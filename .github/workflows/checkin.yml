@@ -1,4 +1,5 @@
 name: AnyRouter 自动签到
+# setup-for-Zev7711
 on:
   schedule:
     - cron: '0 */6 * * *'
