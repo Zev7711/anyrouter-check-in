@@ -119,7 +119,7 @@ def check_session_expiry_warnings(accounts) -> list[str]:
 		if days_left <= SESSION_EXPIRY_WARN_DAYS:
 			warnings.append(
 				f'[WARN] {account_name}: session 将于 {expiry:%Y-%m-%d} 过期（剩余 {max(days_left, 0):.1f} 天），'
-				'请尽快更新；推荐改用 system_access_token（个人设置 -> 安全设置 -> 生成令牌），长期有效'
+				'请尽快重新登录并更新 session'
 			)
 	return warnings
 
@@ -403,8 +403,8 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 系统访问令牌优先：长期有效，不依赖会过期的 session
-	if account.has_access_token():
+	# 签到接口只认登录 session；系统访问令牌只能查询余额，仅在未配置 session/邮箱密码时使用
+	if account.has_access_token() and not (account.cookies or account.has_login_credentials()):
 		waf_cookies = await prepare_cookies(account_name, provider_config, {})
 		if waf_cookies is None:
 			return False, None, None
@@ -417,9 +417,11 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			extra_headers={'Authorization': f'Bearer {account.access_token}'},
 			use_proxy=provider_config.use_proxy,
 		)
-		if result[0] or not (account.cookies or account.has_login_credentials()):
-			return result
-		print(f'[WARN] {account_name}: System access token failed, falling back to other auth methods')
+		if not result[0]:
+			print(
+				f'[FAILED] {account_name}: 系统访问令牌无法调用签到接口，请在 ANYROUTER_ACCOUNTS 中配置 cookies.session'
+			)
+		return result
 
 	# 邮箱密码其次
 	all_cookies = None
@@ -522,8 +524,8 @@ def run_check_in_requests(
 				print(user_info_before.get('error', 'Unknown error'))
 				if user_info_before.get('status_code') == 401:
 					print(
-						f'[FAILED] {account_name}: 登录态已失效 (HTTP 401)。请在 ANYROUTER_ACCOUNTS 中配置 system_access_token '
-						'（长期有效），或重新获取 session cookie 与 api_user 并更新 Secret'
+						f'[FAILED] {account_name}: 登录态已失效 (HTTP 401)。请重新登录 anyrouter.top，'
+						'获取新的 session cookie 并更新 ANYROUTER_ACCOUNTS Secret'
 					)
 					return False, user_info_before, user_info_before
 
