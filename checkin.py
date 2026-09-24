@@ -452,6 +452,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		if not user_cookies:
 			print(f'[FAILED] {account_name}: Invalid configuration format')
 			return False, None, None
+		non_ascii = [k for k, v in user_cookies.items() if not str(v).isascii()]
+		if non_ascii:
+			print(f'[FAILED] {account_name}: cookies {non_ascii} 含中文等非 ASCII 字符，可能是占位符没有替换成真实值')
+			return False, None, None
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 

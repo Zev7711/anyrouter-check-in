@@ -114,3 +114,12 @@ def test_session_expiry_parsed_and_warned():
 	fresh = base64.urlsafe_b64encode(f'{int(datetime.now(timezone.utc).timestamp())}|p'.encode()).decode()
 	assert checkin.check_session_expiry_warnings([AccountConfig(cookies={'session': fresh}, api_user='1')]) == []
 	assert checkin.get_session_expiry({'session': 'not-base64!!'}) is None
+
+
+async def test_placeholder_session_rejected():
+	account = AccountConfig(cookies={'session': '你的session'}, api_user='1')
+	with patch.object(checkin, 'prepare_cookies', AsyncMock()) as prepare:
+		success, _, _ = await checkin.check_in_account(account, 0, AppConfig.load_from_env())
+
+	assert not success
+	prepare.assert_not_awaited()
