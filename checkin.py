@@ -251,7 +251,11 @@ def get_user_info(client, headers, user_info_url: str):
 					'used_quota': used_quota,
 					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
 				}
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+		return {
+			'success': False,
+			'status_code': response.status_code,
+			'error': f'Failed to get user info: HTTP {response.status_code}',
+		}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
@@ -380,10 +384,13 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
 			auth_method = 'email/password'
+		elif account.cookies:
+			print(f'[WARN] {account_name}: Email/password login failed, falling back to session cookies')
 		else:
-			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
+			print(f'[FAILED] {account_name}: Email/password login failed and no session cookies configured')
 			return False, None, None
-	else:
+
+	if all_cookies is None:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
 			print(f'[FAILED] {account_name}: Invalid configuration format')
@@ -454,6 +461,12 @@ def run_check_in_requests(
 				print(user_info_before['display'])
 			elif user_info_before:
 				print(user_info_before.get('error', 'Unknown error'))
+				if user_info_before.get('status_code') == 401:
+					print(
+						f'[FAILED] {account_name}: 登录态已失效 (HTTP 401)。请在 ANYROUTER_ACCOUNTS 中配置 email+password '
+						'实现自动登录，或重新获取 session cookie 与 api_user 并更新 Secret'
+					)
+					return False, user_info_before, user_info_before
 
 			if provider_config.needs_manual_check_in():
 				success = execute_check_in(client, account_name, provider_config, headers)
@@ -471,6 +484,37 @@ def run_check_in_requests(
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return False, None, None
+
+
+def write_step_summary(accounts, account_check_in_details: dict, success_count: int, total_count: int):
+	"""在 GitHub Actions 运行页面输出签到结果摘要"""
+	summary_path = os.getenv('GITHUB_STEP_SUMMARY', '').strip()
+	if not summary_path:
+		return
+
+	lines = [
+		f'### AnyRouter 签到结果：{success_count}/{total_count} 成功',
+		'',
+		'| 账号 | 状态 | 余额 | 本次签到获得 | 累计消耗 |',
+		'| --- | --- | --- | --- | --- |',
+	]
+	for i, account in enumerate(accounts):
+		detail = account_check_in_details.get(f'account_{i + 1}')
+		name = account.get_display_name(i)
+		if detail:
+			status = '✅' if detail['success'] else '❌'
+			lines.append(
+				f'| {name} | {status} | ${detail["after_quota"]:.2f} | '
+				f'+${detail["check_in_reward"]:.2f} | ${detail["after_used"]:.2f} |'
+			)
+		else:
+			lines.append(f'| {name} | ❌ | - | - | - |')
+
+	try:
+		with open(summary_path, 'a', encoding='utf-8') as f:
+			f.write('\n'.join(lines) + '\n')
+	except Exception as e:
+		print(f'Warning: Failed to write step summary: {e}')
 
 
 async def main():
@@ -599,6 +643,8 @@ async def main():
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
+
+	write_step_summary(accounts, account_check_in_details, success_count, total_count)
 
 	if need_notify and notification_content:
 		summary = [

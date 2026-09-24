@@ -2,7 +2,8 @@ name: AnyRouter 自动签到
 # setup-for-Zev7711
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 避开整点高峰（整点任务常被 GitHub 延迟或丢弃）；每 6 小时一次，失败可在下一轮自动补签
+    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -11,9 +12,18 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+  actions: write # 用于 keepalive：定期重新启用本工作流，防止 60 天无提交后被 GitHub 自动停用
+
+concurrency:
+  group: checkin
+  cancel-in-progress: false
+
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -133,6 +143,12 @@ jobs:
     - name: 停止代理
       if: always()
       run: bash scripts/stop_mihomo_proxy.sh
+
+    - name: 保活（防止定时任务因仓库不活跃被停用）
+      if: always() && github.event_name == 'schedule'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/checkin.yml/enable" || echo "keepalive skipped"
 
     - name: 执行结果
       if: always()
