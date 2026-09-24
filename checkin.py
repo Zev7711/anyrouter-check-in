@@ -4,11 +4,12 @@ AnyRouter.top 自动签到脚本
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
@@ -41,6 +42,8 @@ from utils.proxy import get_playwright_proxy, get_proxy_server
 load_dotenv()
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+SESSION_MAX_AGE = timedelta(days=30)
+SESSION_EXPIRY_WARN_DAYS = 5
 
 
 def load_balance_hash():
@@ -85,6 +88,40 @@ def parse_cookies(cookies_data):
 				cookies_dict[key] = value
 		return cookies_dict
 	return {}
+
+
+def get_session_expiry(cookies_data) -> datetime | None:
+	"""从 NewAPI session cookie 中解析签发时间，推算过期时间（session 有效期 30 天）"""
+	session = parse_cookies(cookies_data).get('session') if cookies_data else None
+	if not session:
+		return None
+	try:
+		padded = session + '=' * (-len(session) % 4)
+		issued_at = int(base64.urlsafe_b64decode(padded).split(b'|', 1)[0])
+		return datetime.fromtimestamp(issued_at, tz=timezone.utc) + SESSION_MAX_AGE
+	except Exception:
+		return None
+
+
+def check_session_expiry_warnings(accounts) -> list[str]:
+	"""仅依赖 session cookie 的账号，在过期前 N 天给出提醒"""
+	warnings = []
+	now = datetime.now(timezone.utc)
+	for i, account in enumerate(accounts):
+		if account.has_access_token() or account.has_login_credentials():
+			continue
+		expiry = get_session_expiry(account.cookies)
+		if not expiry:
+			continue
+		days_left = (expiry - now).total_seconds() / 86400
+		account_name = account.get_display_name(i)
+		print(f'[INFO] {account_name}: Session expires at {expiry:%Y-%m-%d %H:%M} UTC ({days_left:.1f} days left)')
+		if days_left <= SESSION_EXPIRY_WARN_DAYS:
+			warnings.append(
+				f'[WARN] {account_name}: session 将于 {expiry:%Y-%m-%d} 过期（剩余 {max(days_left, 0):.1f} 天），'
+				'请尽快更新；推荐改用 system_access_token（个人设置 -> 安全设置 -> 生成令牌），长期有效'
+			)
+	return warnings
 
 
 async def get_waf_cookies_with_browser(
@@ -366,7 +403,25 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 邮箱密码优先
+	# 系统访问令牌优先：长期有效，不依赖会过期的 session
+	if account.has_access_token():
+		waf_cookies = await prepare_cookies(account_name, provider_config, {})
+		if waf_cookies is None:
+			return False, None, None
+		print(f'[AUTH] {account_name}: Using auth method -> system access token')
+		result = run_check_in_requests(
+			waf_cookies,
+			account,
+			account_name,
+			provider_config,
+			extra_headers={'Authorization': f'Bearer {account.access_token}'},
+			use_proxy=provider_config.use_proxy,
+		)
+		if result[0] or not (account.cookies or account.has_login_credentials()):
+			return result
+		print(f'[WARN] {account_name}: System access token failed, falling back to other auth methods')
+
+	# 邮箱密码其次
 	all_cookies = None
 	resolved_api_user: str | None = None
 	auth_method = None
@@ -420,6 +475,7 @@ def run_check_in_requests(
 	provider_config,
 	*,
 	api_user_override: str | None = None,
+	extra_headers: dict | None = None,
 	use_proxy: bool = False,
 ) -> tuple[bool, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
@@ -451,6 +507,9 @@ def run_check_in_requests(
 				'Sec-Fetch-Site': 'same-origin',
 			}
 
+			if extra_headers:
+				headers.update(extra_headers)
+
 			api_user = api_user_override or account.api_user
 			if api_user:
 				headers[provider_config.api_user_key] = api_user
@@ -463,8 +522,8 @@ def run_check_in_requests(
 				print(user_info_before.get('error', 'Unknown error'))
 				if user_info_before.get('status_code') == 401:
 					print(
-						f'[FAILED] {account_name}: 登录态已失效 (HTTP 401)。请在 ANYROUTER_ACCOUNTS 中配置 email+password '
-						'实现自动登录，或重新获取 session cookie 与 api_user 并更新 Secret'
+						f'[FAILED] {account_name}: 登录态已失效 (HTTP 401)。请在 ANYROUTER_ACCOUNTS 中配置 system_access_token '
+						'（长期有效），或重新获取 session cookie 与 api_user 并更新 Secret'
 					)
 					return False, user_info_before, user_info_before
 
@@ -617,6 +676,11 @@ async def main():
 			print(f'[FAILED] {account_name} processing exception: {e}')
 			need_notify = True
 			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+
+	expiry_warnings = check_session_expiry_warnings(accounts)
+	if expiry_warnings:
+		need_notify = True
+		notification_content.extend(expiry_warnings)
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 	if current_balance_hash:

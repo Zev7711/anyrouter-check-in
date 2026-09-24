@@ -61,3 +61,59 @@ def test_step_summary_written(tmp_path, monkeypatch):
 
 	text = summary.read_text(encoding='utf-8')
 	assert '1/1' in text and '+$25.00' in text and '主账号' in text
+
+
+async def test_access_token_used_before_session():
+	account = AccountConfig(cookies={'session': 's'}, api_user='1', access_token='tok')
+	with (
+		patch.object(checkin, 'prepare_cookies', AsyncMock(return_value={'acw_tc': 'w'})),
+		patch.object(checkin, 'run_check_in_requests', return_value=(True, None, None)) as run,
+	):
+		success, _, _ = await checkin.check_in_account(account, 0, AppConfig.load_from_env())
+
+	assert success
+	assert run.call_count == 1
+	assert run.call_args.kwargs['extra_headers'] == {'Authorization': 'Bearer tok'}
+	assert 'session' not in run.call_args.args[0]
+
+
+async def test_access_token_failure_falls_back_to_session():
+	account = AccountConfig(cookies={'session': 's'}, api_user='1', access_token='tok')
+	with (
+		patch.object(
+			checkin, 'prepare_cookies', AsyncMock(side_effect=[{'acw_tc': 'w'}, {'acw_tc': 'w', 'session': 's'}])
+		),
+		patch.object(checkin, 'run_check_in_requests', side_effect=[(False, None, None), (True, None, None)]) as run,
+	):
+		success, _, _ = await checkin.check_in_account(account, 0, AppConfig.load_from_env())
+
+	assert success
+	assert run.call_count == 2
+	assert run.call_args.args[0]['session'] == 's'
+
+
+def test_access_token_config_aliases():
+	from utils.config import AccountConfig as AC
+
+	assert AC.from_dict({'api_user': '1', 'system_access_token': 'a'}, 0).access_token == 'a'
+	assert AC.from_dict({'api_user': '1', 'access_token': 'b'}, 0).access_token == 'b'
+
+
+def test_session_expiry_parsed_and_warned():
+	import base64
+	from datetime import datetime, timedelta, timezone
+
+	issued = datetime.now(timezone.utc) - timedelta(days=27)
+	raw = f'{int(issued.timestamp())}|payload|sig'.encode()
+	session = base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+	expiry = checkin.get_session_expiry({'session': session})
+	assert expiry is not None
+	assert abs((expiry - (issued + timedelta(days=30))).total_seconds()) < 2
+
+	warnings = checkin.check_session_expiry_warnings([AccountConfig(cookies={'session': session}, api_user='1')])
+	assert len(warnings) == 1 and '过期' in warnings[0]
+
+	fresh = base64.urlsafe_b64encode(f'{int(datetime.now(timezone.utc).timestamp())}|p'.encode()).decode()
+	assert checkin.check_session_expiry_warnings([AccountConfig(cookies={'session': fresh}, api_user='1')]) == []
+	assert checkin.get_session_expiry({'session': 'not-base64!!'}) is None

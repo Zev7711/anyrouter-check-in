@@ -155,6 +155,7 @@ class AccountConfig:
 	name: str | None = None
 	email: str | None = None
 	password: str | None = None
+	access_token: str | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -169,11 +170,16 @@ class AccountConfig:
 			name=name if name else None,
 			email=data.get('email'),
 			password=data.get('password'),
+			access_token=data.get('system_access_token') or data.get('access_token'),
 		)
 
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def has_access_token(self) -> bool:
+		"""是否配置了系统访问令牌（个人设置 -> 安全设置 -> 生成令牌），长期有效"""
+		return bool(self.access_token)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -215,9 +221,10 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
+			has_token = account_dict.get('system_access_token') or account_dict.get('access_token')
 
-			if not has_cookies and not has_login:
-				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
+			if not has_cookies and not has_login and not has_token:
+				print(f'ERROR: Account {i + 1} must have system_access_token, cookies or email+password')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:
